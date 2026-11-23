@@ -24,6 +24,8 @@ Exit (whole position, any one fires):
   5. Trailing stop: once value >= cost * 1.0015 (armed at +15 bps),
      exit if close <= peak close since entry * (1 - 100 bps).
 
+The five exit checks live in Bot.should_exit(), evaluated in the
+order listed above; it returns which exit fired (or None).
 Every order carries max_slippage_bps = 100. Sizing is full cash on
 every buy. Deterministic, standard library only: no network, no wall
 clock, no randomness, no file reads. Indicators use float closes only;
@@ -90,6 +92,28 @@ class Bot:
             return None
         return (self.tr_pref[i + 1] - self.tr_pref[i + 1 - span]) / span
 
+    def should_exit(self, i, close, sma_slow, value, cost):
+        """Exit decision, evaluated in the fixed order below.
+
+        All money comparisons use the exact integers the harness
+        reports (position value at the latest close, position cost
+        including fees); the trailing check uses float closes. The
+        caller must have updated self.peak for this bar first.
+        Returns the exit reason, or None to stay in the position.
+        """
+        if value * 10000 >= cost * (10000 + TP_BPS):
+            return "tp"
+        if value * 10000 <= cost * (10000 - STOP_BPS):
+            return "stop"
+        if close < sma_slow:
+            return "trend_break"
+        if self.entry_i is not None and i - self.entry_i >= MAX_HOLD_BARS:
+            return "max_hold"
+        if value * 10000 >= cost * (10000 + TRAIL_ARM_BPS):
+            if self.peak is not None and close <= self.peak * (1.0 - TRAIL_BPS / 10000.0):
+                return "trailing"
+        return None
+
     def on_batch(self, state, batch):
         i = state.seq
         bar = state.latest[SYMBOL]
@@ -138,17 +162,8 @@ class Bot:
                 self.peak = close
             value = state.value(SYMBOL, holding.qty)
             cost = holding.cost
-            if value * 10000 >= cost * (10000 + TP_BPS):
+            if self.should_exit(i, close, sma_slow, value, cost) is not None:
                 return self._sell(holding)
-            if value * 10000 <= cost * (10000 - STOP_BPS):
-                return self._sell(holding)
-            if close < sma_slow:
-                return self._sell(holding)
-            if self.entry_i is not None and i - self.entry_i >= MAX_HOLD_BARS:
-                return self._sell(holding)
-            if value * 10000 >= cost * (10000 + TRAIL_ARM_BPS):
-                if self.peak is not None and close <= self.peak * (1.0 - TRAIL_BPS / 10000.0):
-                    return self._sell(holding)
             return None
 
         # Flat: entry, all filters must hold.
